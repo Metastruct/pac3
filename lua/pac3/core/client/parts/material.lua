@@ -392,6 +392,9 @@ function PART:GetMaterialFromParent()
 		end
 
 		self.Parent.Materialm = self.Materialm
+		if self.Parent.UpdateSubMaterialId then
+			self.Parent:UpdateSubMaterialId()
+		end
 
 		return self.Materialm
 	end
