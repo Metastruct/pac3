@@ -86,54 +86,41 @@ local function install_generic_preview_hover(option, key, preview_value)
 end
 
 ---returns table
+--all_paths is the pure sequential table ignoring gaps
 --start_index is the first known index
 --continuous is whether it's continuous (some series have holes)
 --end_index is the last known
 function pace.FindAssetSeriesBounds(base_directory, base_file, extension)
-
-	--LEADING ZEROES FIX NOT YET IMPLEMENTED
-	local function leading_zeros(str)
-		str = string.StripExtension(str)
-
-		local untilzero_pattern = "%f[1-9][0-9]+$"
-		local afterzero_pattern = "0+%f[1-9+]"
-		local beforenumbers_pattern = "%f[%f[1-9][0-9]+$]"
-		--string.gsub(str, "%f[1-9][0-9]+$", "") --get the start until the zeros stop
-
-		--string.gsub(str, "0+%f[1-9+]", "") --leave start
-
-		if string.find(str, afterzero_pattern) then
-			return string.gsub(str, untilzero_pattern, string.match(str, afterzero_pattern))
-		end
-	end
-	--print(base_file .. "leading zeros?" , leading_zeros(base_file))
+	
 	if searched_cache_series_results[base_directory .. "/" .. base_file] then return searched_cache_series_results[base_directory .. "/" .. base_file] end
 	local tbl = {}
 	local i = 0 --try with 0 at first
 	local keep_looking = true
-	local file_n
 	local lookaheads_left = 15
 	local next_exists
 	tbl.start_index = nil
 	tbl.all_paths = {}
-	local index_compressed = 1 --increasing ID number of valid files
 
 	while keep_looking do
-
-		file_n = base_directory .. "/" .. base_file .. i .. "." .. extension
-		--print(file_n , "file" , file.Exists(file_n, "GAME") and "exists" or "doesn't exist")
-		--print("checking" , file_n) print("\tThe file" , file.Exists(file_n, "GAME") and "exists" or "doesn't exist")
-		if file.Exists(file_n, "GAME") then
+		if file.Exists(base_directory .. "/" .. base_file .. i .. "." .. extension, "GAME") then
 			if not tbl.start_index then tbl.start_index = i end
 			tbl.end_index = i
-			tbl.all_paths[index_compressed] = file_n
-			index_compressed = index_compressed + 1
+			table.insert(tbl.all_paths, base_directory .. "/" .. base_file .. i .. "." .. extension)
+		elseif file.Exists(base_directory .. "/" .. base_file .. "0" .. i .. "." .. extension, "GAME") then
+			if not tbl.start_index then tbl.start_index = i end
+			tbl.end_index = i
+			table.insert(tbl.all_paths, base_directory .. "/" .. base_file .. "0" .. i .. "." .. extension)
+		elseif file.Exists(base_directory .. "/" .. base_file .. "00" .. i .. "." .. extension, "GAME") then
+			if not tbl.start_index then tbl.start_index = i end
+			tbl.end_index = i
+			table.insert(tbl.all_paths, base_directory .. "/" .. base_file .. "00" .. i .. "." .. extension)
 		end
 
-
 		i = i + 1
-		file_n = base_directory .. "/" .. base_file .. i .. "." .. extension
-		next_exists = file.Exists(file_n, "GAME")
+		next_exists = file.Exists(base_directory .. "/" .. base_file .. i .. "." .. extension, "GAME")
+			or file.Exists(base_directory .. "/" .. base_file .. "0" .. i .. "." .. extension, "GAME")
+			or file.Exists(base_directory .. "/" .. base_file .. "00" .. i .. "." .. extension, "GAME")
+
 		if not next_exists then
 			if tbl.start_index then tbl.continuous = false end
 			lookaheads_left = lookaheads_left - 1
@@ -2976,6 +2963,67 @@ do -- vector
 							end
 							if input.IsKeyDown(KEY_ESCAPE) then pac.RemoveHook("DrawOverlay", "colorpicker") end
 						end)
+					end
+
+					--light color tools
+					local btn3 = vgui.Create("DImageButton", self)
+					btn3:SetSize(line_height / 1.5, line_height / 1.5)
+					btn3:Dock(RIGHT) btn3:DockPadding(0,0,2 * line_height / 1.5,0)
+					btn3:SetTooltip("Light tools")
+					btn3:SetImage("icon16/lightbulb.png")
+					btn3.DoClick = function()
+						local menu = DermaMenu()
+						menu:SetPos(input.GetCursorPos())
+						menu:MakePopup()
+
+						local part = pace.current_part
+						local key = self.CurrentKey
+						local function apply_kelvin_color(str)
+							local color, temp = pac.TemperatureToColor(str)
+							if temp ~= nil then pace.color_temperature_active_temp = temp end
+							if color == nil then return end
+							local vec = color
+							if part.ProperColorRange then
+								vec = Vector(color.r/255,color.g/255,color.b/255)
+							else
+								vec = Vector(color.r,color.g,color.b)
+							end
+							if self:IsValid() then
+								self:SetValue(vec)
+								self.OnValueChanged(vec)
+							elseif part:IsValid() then
+								part:SetProperty(key, vec)
+								pace.PopulateProperties(part)
+							end
+						end
+
+						menu:AddOption("From a Kelvin value or keyword", function()
+							Derma_StringRequest("Temperature to Color", "Provide a temperature in Kelvins between 1000-40000, or from the list of preselected keywords\ntype help to print the full list in the console", "1000", apply_kelvin_color)
+						end):SetImage("icon16/textfield.png")
+						menu:AddOption("Temperature explorer", function()
+							pac.OpenTemperatureToColorMenu(part, key, apply_kelvin_color)
+						end):SetImage("icon16/page_white_wrench.png")
+						menu:AddOption("Sample local lighting (raw)", function()
+							local color = render.GetLightColor(part:GetWorldPosition())
+							local vec = color
+							if not part.ProperColorRange then
+								vec = 255*Vector(color.r,color.g,color.b)
+							end
+							self:SetValue(vec)
+							self.OnValueChanged(vec)
+						end):SetImage("icon16/lightbulb_off.png")
+						menu:AddOption("Sample local lighting (normalized)", function()
+							local color = render.GetLightColor(part:GetWorldPosition())
+							local vec = color
+							local max_component = math.max(color.x, color.y, color.z)
+							--normalize the light
+							if max_component ~= 0 then color = color * (1/max_component) end
+							if not part.ProperColorRange then
+								vec = 255*Vector(color.r,color.g,color.b)
+							end
+							self:SetValue(vec)
+							self.OnValueChanged(vec)
+						end):SetImage("icon16/weather_sun.png")
 					end
 				end
 			end
