@@ -70,6 +70,18 @@ BUILDER:StartStorableVars()
 		BUILDER:GetSet("Sliding", true)
 		--BUILDER:GetSet("AddVelocityFromOwner", false)
 		BUILDER:GetSet("OwnerVelocityMultiplier", 0)
+	BUILDER:SetPropertyGroup("particle function - EXPERIMENTAL")
+		BUILDER:GetSet("Animated", false)
+		BUILDER:GetSet("BrownianMotion", false)
+		BUILDER:GetSet("ThinkTime", 0)
+		BUILDER:GetSet("AnimatedParticleWrap", false, {description = "loop back to frame 1 when reaching max frame, otherwise stop there"})
+		BUILDER:GetSet("AnimatedParticleStartFrame", 1)
+		BUILDER:GetSet("AnimatedParticleMaxFrame", 0)
+		BUILDER:GetSet("AnimatedParticleFps", 0)
+		BUILDER:GetSet("AnimatedTextureType", "$basetexture", {enums = function() return {["$basetexture"] = "$basetexture", ["$detail"] = "$detail", ["$normalmap"] = "$normalmap", ["$dudvmap"] = "$dudvmap"} end})
+		BUILDER:GetSet("IndividualBrownianStrength", 0, {description = "Base chaos amount the particle starts with. NOT adjustable post-emission."})
+		BUILDER:GetSet("SharedBrownianStrength", 0, {description = "All of the part's particles share this chaos amount. Adjustable post-emission."})
+		BUILDER:GetSet("FlockBrownianStrength", 0, {description = "All of the part's particles share the same direction contributed by this factor to simulate one type of flock behavior. Adjustable post-emission."})
 
 
 
@@ -129,6 +141,55 @@ local function StickCallback(particle, hitpos, normal)
 	particle:SetEndAlpha(particle.StickEndAlpha or 0)
 end
 
+-- Think functions
+local function brownian(particle)
+	particle:SetVelocity(
+		particle:GetVelocity() +
+		VectorRand(-particle.IndividualBrownianStrength,particle.IndividualBrownianStrength) +
+		VectorRand(-particle.part.SharedBrownianStrength,particle.part.SharedBrownianStrength) + 
+		particle.part.correlated_brownian_vector
+	)
+end
+
+local expanded_mats_pool = {}
+
+local function spritecard2(particle)
+	if particle.mat_series == nil then return end
+	local chosen_frame = 0
+	particle.next_frame = particle.next_frame or CurTime()
+	if CurTime() > particle.next_frame then
+		particle.frame = particle.frame + (particle.frame_per_second > 0 and 1 or -1)
+
+		if particle.FrameWrap then
+			local max = #particle.mat_series
+			if particle.AnimatedParticleMaxFrame ~= 0 then max = particle.AnimatedParticleMaxFrame end
+			particle.clamp_frame = (particle.frame % max) + 1
+		else
+			particle.clamp_frame = math.Clamp(particle.frame, 1, #particle.mat_series)
+		end
+		particle.next_frame = CurTime() + 1 / math.abs(particle.frame_per_second)
+	end
+	chosen_frame = math.Clamp(particle.clamp_frame or particle.frame, 1, #particle.mat_series)
+
+	particle:SetMaterial(particle.mat_series[chosen_frame])
+end
+
+local function fading_inout_alpha(particle)
+	local alpha = 255*math.Clamp(-particle.birth + CurTime(),0,1)*math.Clamp(particle.maxlife - (-particle.birth + CurTime()),0,1)
+	particle:SetStartAlpha(alpha) particle:SetEndAlpha(alpha)
+end
+
+local function unified_func(particle)
+	if particle.animated and particle.frame_per_second ~= 0 then
+		spritecard2(particle)
+	end
+	if particle.brownian then
+		brownian(particle)
+	end
+
+	particle:SetNextThink(CurTime() + particle.thinktime)
+end
+
 function PART:GetEmitter()
 	if not self.emitter then
 		self.NextShot = 0
@@ -170,6 +231,7 @@ function PART:OnShow(from_rendering)
 end
 
 function PART:OnDraw()
+	self.correlated_brownian_vector = VectorRand(-self.FlockBrownianStrength, self.FlockBrownianStrength)
 	self.number_particles = self.NumberParticles or 0
 	if not self.FireOnce then
 		if self.Decay == 0 then
@@ -227,6 +289,23 @@ function PART:SetAdditive(b)
 	self:SetMaterial(self:GetMaterial())
 end
 
+
+--CURRENT ISSUES WITH ANIMATED PARTICLES
+--material creation is one-way and unlinked. Changes to pac materials won't be reflected after the particle samples the raw material
+--currently, keyvalues aren't imported properly
+local disclaimer = "BEWARE. The way to setup animated particles needs to be done BEFORE the particle samples your material when attempting to create the series of material copies in a ONE-WAY process.\n\n"..
+"It doesn't transfer all the keyvalues correctly. And several shaders are unusable.\n\n"..
+"1-Use UnlitGeneric or Refract. Other shaders are shown not to work. If you need a specific texture, create a pac material instead.\n"..
+"2-If it's a pac material, create your material FIRST. And MAKE SURE it loads before the particle, using draw order and hierarchy.\n"..
+"3-Make sure it has frames AND those frames match the texture type. The particle can control one type at a time\n\n"..
+"Only if you understand this, you can run pac_prompt_animated_textures 0"
+
+function PART:SetAnimated(b)
+	self.Animated = b
+	if self.Animated then
+		self:SetWarning(disclaimer)
+	end
+end
 function PART:SetMaterial(var)
 	var = var or ""
 
@@ -247,18 +326,41 @@ function PART:SetMaterial(var)
 	self.Material = var
 end
 
+--many shaders crash instantly
+--or just not work properly
+local allowed_shaders = {
+	["sprite"] = true,
+	["unlittwotexture"] = true,
+	["unlitgeneric"] = true,
+	["refract"] = true,
+	["spritecard"] = true,
+	["sprite_dx9"] = true,
+	["refract_dx90"] = true,
+}
+local texture_frame_key = {
+	["$basetexture"] = "$frame",
+	["$normalmap"] = "$bumpframe",
+	["$detail"] = "$detailframe",
+	["$dudvmap"] = "$dudvframe"
+}
+
+
 function PART:EmitParticles(pos, ang, real_ang)
 	self.number_particles = self.number_particles or 0
 	if self.FireOnce and not self.FirstShot then self.CanKeepFiring = false end
 	local emt = self:GetEmitter()
 	if not emt then return end
-
+	
 	if self.NextShot < pac.RealTime and self.CanKeepFiring then
 		if self.Material == "" then return end
 		if self.Velocity == 500.01 then return end
 
 		local originalAng = ang
 		ang = ang:Forward()
+
+		local animated = self.Animated
+		local brownian = self.BrownianMotion
+		local thinkable = animated or brownian
 
 		local double = 1
 		if self.DoubleSided then
@@ -276,6 +378,11 @@ function PART:EmitParticles(pos, ang, real_ang)
 				self.number_particles = self.number_particles + 1
 			end
 		end
+
+		expanded_mats_pool[self:GetPlayerOwner()] = expanded_mats_pool[self:GetPlayerOwner()] or {}
+		local owner_mats_pool = expanded_mats_pool[self:GetPlayerOwner()] or {}
+		local material = self.Materialm or self.Material
+		local basematerial = self.Materialm or self.Material
 
 		for _ = 1, math.min(self.number_particles,max) do
 			local mats = self.Material:Split(";")
@@ -324,6 +431,65 @@ function PART:EmitParticles(pos, ang, real_ang)
 
 			for i = 1, double do
 				local particle = emt:Add(self.Materialm or self.Material, pos)
+				if thinkable then
+					if animated then
+						local matname = basematerial:GetName()
+						local kvs = basematerial:GetKeyValues()
+						local mats
+						--create material series
+
+						if not owner_mats_pool[matname] or self.FireOnce then
+							if not allowed_shaders[basematerial:GetShader():lower()] then
+								self:SetError("Forbidden material! " .. basematerial:GetShader():lower() .. " shader will probably cause an instant crash."..
+									"Only use one of the following shader types:" ..
+									"\n  sprite\n  unlittwotexture\n  unlitgeneric\n  refract\n  spritecard\n  sprite_dx9"
+								)
+								return
+							end
+							
+							owner_mats_pool[matname] = {}
+							mats = owner_mats_pool[matname]
+							if basematerial:GetTexture(self.AnimatedTextureType) then
+								for i=1, basematerial:GetTexture(self.AnimatedTextureType):GetNumAnimationFrames(), 1 do
+									owner_mats_pool[matname][i] = pac.CreateMaterial(matname .. "_" .. i, basematerial:GetShader(), kvs)
+									for _,texture_type in ipairs({"$basetexture", "$normalmap", "$detail", "$dudvmap"}) do
+										owner_mats_pool[matname][i]:SetTexture(texture_type, basematerial:GetTexture(texture_type))
+										owner_mats_pool[matname][i]:SetInt(
+											texture_frame_key[texture_type],
+											self.AnimatedTextureType == texture_type and i or 1
+										)
+									end
+									owner_mats_pool[matname][i]:SetInt("$flags", basematerial:GetInt("$flags"))
+								end
+							end
+							
+						end
+						mats = owner_mats_pool[matname]
+						if not mats then self:SetError("Looks like the material might've failed to be created") continue end
+
+						local sane_frame = math.Clamp(math.ceil(self.AnimatedParticleStartFrame),1,#mats)
+						if not mats[sane_frame] then self:SetError("Looks like the material might've failed to be selected") continue end
+						particle:SetMaterial(mats[sane_frame])
+
+						particle.frame = self.AnimatedParticleStartFrame
+						particle.mat_name = matname
+						particle.mat_series = mats
+						particle.frame_per_second = self.AnimatedParticleFps
+						particle.FrameWrap = self.AnimatedParticleWrap
+						particle.AnimatedParticleMaxFrame = self.AnimatedParticleMaxFrame
+					end
+					particle:SetNextThink(CurTime())
+					if brownian then
+						particle.IndividualBrownianStrength = self.IndividualBrownianStrength
+						particle.FlockBrownianStrength = self.FlockBrownianStrength
+					end
+					particle.animated = animated
+					particle.brownian = brownian
+					particle.thinktime = self.ThinkTime
+					particle.part = self
+					particle:SetThinkFunction(unified_func)
+				end
+				
 
 				if double == 2 then
 					local ang_
